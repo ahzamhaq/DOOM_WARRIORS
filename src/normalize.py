@@ -1,6 +1,6 @@
-"""Name / address normalization. Owner: Person 2.
+"""Name / address normalization. Owner: Person 2.  Contract: docs/CONTRACT.md §3.
 
-Must work for any country label (test adds France, unseen in train).
+Row-wise, stateless, deterministic; never branch on the country value (France is unseen in train).
 EDA findings to handle (see outputs/eda_report.txt):
   - junk prefixes/wrappers: "-- ", "<< ", "#", "[...]"
   - names given as domains/handles: "aimsons.com", "@barretocardiology"
@@ -12,18 +12,6 @@ EDA findings to handle (see outputs/eda_report.txt):
 import pandas as pd
 
 
-def normalize_name(s: pd.Series) -> pd.Series:
-    """Lowercase, strip junk/punctuation, drop legal suffixes. Returns cleaned string."""
+def normalize_records(df: pd.DataFrame) -> pd.DataFrame:
+    """Return `df` with config.NORM_COLUMNS added; same index and row order, raw columns untouched."""
     raise NotImplementedError
-
-
-def normalize_address(s: pd.Series) -> pd.Series:
-    """Lowercase, expand/standardize abbreviations, drop punctuation and NULL tokens."""
-    raise NotImplementedError
-
-
-def add_normalized_columns(df: pd.DataFrame) -> pd.DataFrame:
-    """Adds `name_norm` and `addr_norm` columns to a source DataFrame."""
-    df["name_norm"] = normalize_name(df["business_name"])
-    df["addr_norm"] = normalize_address(df["business_address"])
-    return df

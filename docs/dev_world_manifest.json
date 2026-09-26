@@ -1,0 +1,45 @@
+{
+  "env_info_not_verified": {
+    "numpy": "2.5.3",
+    "pandas": "3.0.6",
+    "pyarrow": "25.0.1",
+    "python": "3.12.5"
+  },
+  "n_s1": 30000,
+  "pool_by_source_country": {
+    "S2/India": 47703,
+    "S2/US": 70289,
+    "S3/India": 50317,
+    "S3/US": 74578
+  },
+  "pool_records_matching_a_sampled_s1": 103865,
+  "pool_records_other": 139022,
+  "positive_pairs": 103865,
+  "recipe": "see docstring of scripts/build_dev_world.py",
+  "rows": {
+    "ground_truth.tsv": 30000,
+    "s1.tsv": 30000,
+    "s2.tsv": 117992,
+    "s3.tsv": 124895
+  },
+  "s1_by_country": {
+    "India": 12096,
+    "US": 17904
+  },
+  "s1_by_split": {
+    "train": 23956,
+    "val": 6044
+  },
+  "sampling_fraction_f": 0.013594,
+  "seed": 42,
+  "sha256": {
+    "ground_truth.tsv": "833e809a264fc6332df16a450f92fe4489726b45a71efea876b0ab314a37970e",
+    "s1.tsv": "0a596b76aa325b2904c25952527cd2303ce6b3e8dc7b3ceb71cc19385befb00b",
+    "s2.tsv": "b42ba9df687fc9e21e0fe0fdae097686219770358334a75ec9235dfe6e0d81ac",
+    "s3.tsv": "4dc7264dca77d67c235e6b0d395c66cfe298ff85d9dab219a5d2cd8cccb0aaf9"
+  },
+  "singleton_s1": 1651,
+  "train_s1_total": 2206821,
+  "val_frac": 0.2,
+  "version": 1
+}

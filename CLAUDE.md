@@ -50,6 +50,9 @@ Candidate features to try (test each, keep only what helps; none are mandatory):
 
 `candidate_pairs.tsv` must be the exact set fed to the matcher (the last stage before scoring), and matches must be a subset of it.
 
+## Integration contract
+**`docs/CONTRACT.md` defines the data shapes between modules** (records → normalized → pairs → features → scored → matches), the per-country chunked loop in `predict.py`, and per-module signatures. Code to it; do not change a shared shape or signature without Lead sign-off and an update to that file in the same change. Shared column names and tuning constants live in `src/config.py`. Before merging any module change run `python -m unittest discover -s tests -t . -v`. For development use the small frozen dev world (`python -m scripts.build_dev_world`, git-ignored; its numbers are optimistic, see CONTRACT §10). `config.ONE_TO_ONE` (one S2/S3 record per S1) is an **experimental option, off by default**; never assume it.
+
 ## Team and file ownership
 | Person | Role | Owns |
 | --- | --- | --- |

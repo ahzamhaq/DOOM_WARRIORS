@@ -1,8 +1,13 @@
 """Competition metric: macro F0.5 over Source 1 entities (singletons included).
 
 Owner: Person 4. Also home for the validation split and submission checks.
+Contract: docs/CONTRACT.md §7. Implemented: metric + truth parsing. Still to implement (signatures fixed):
+split_s1, label_pairs, check_pairs, check_feats, blocking_report, sweep_thresholds,
+per_country_report  (stubs at the bottom of this file).
 """
-from src.config import BETA
+import pandas as pd
+
+from src.config import BETA, SEED
 
 
 def f_beta(pred: set, truth: set, beta: float = BETA) -> float:
@@ -37,3 +42,42 @@ def truth_dict(gt_raw) -> dict:
         s1: set(m.split(",")) if m else set()
         for s1, m in zip(gt_raw["source1_entity_id"], gt_raw["matched_entity_ids"].astype(str))
     }
+
+
+# ---------------------------------------------------------------------------
+# To implement (Person 4). Signatures are the integration contract.
+# ---------------------------------------------------------------------------
+def split_s1(s1_ids, val_frac: float = 0.1, seed: int = SEED):
+    """Deterministic, hash-based S1-level split -> (train_ids, val_ids). Same result on every machine."""
+    raise NotImplementedError
+
+
+def label_pairs(pairs: pd.DataFrame, truth: dict) -> pd.Series:
+    """int8 1/0 per pair (is cand_id in truth[s1_id]), aligned to pairs.index."""
+    raise NotImplementedError
+
+
+def check_pairs(pairs: pd.DataFrame, s1: pd.DataFrame, pool: pd.DataFrame) -> None:
+    """Assert blocking invariants (CONTRACT §4): S2/S3 ids only, same country, no duplicates, cap per S1."""
+    raise NotImplementedError
+
+
+def check_feats(feats: pd.DataFrame, pairs: pd.DataFrame) -> None:
+    """Assert feature invariants (CONTRACT §5): index == pairs.index, numeric, no inf, fixed columns."""
+    raise NotImplementedError
+
+
+def blocking_report(pairs: pd.DataFrame, truth: dict, s1_country: pd.Series) -> pd.DataFrame:
+    """Candidate recall and avg candidates per S1, by country and by source (S2/S3)."""
+    raise NotImplementedError
+
+
+def sweep_thresholds(scored: pd.DataFrame, truth: dict, s1_ids, select_fn, grid) -> pd.DataFrame:
+    """Macro F0.5 (+ precision/recall) per threshold. `select_fn(scored, t)` is matcher.select_matches,
+    injected by the caller so this module never imports matcher. `s1_ids` = ALL S1 ids scored."""
+    raise NotImplementedError
+
+
+def per_country_report(matches: pd.DataFrame, truth: dict, s1_country: pd.Series) -> pd.DataFrame:
+    """Macro F0.5 by country, plus leave-one-country-out numbers as a proxy for unseen France."""
+    raise NotImplementedError

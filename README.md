@@ -23,7 +23,9 @@ Unzip `student_resource.zip` into `data/raw/` so that `data/raw/dataset/{train,t
 ## Run (from repo root)
 ```bash
 python -m notebooks.eda      # dataset report
-python -m src.predict        # writes outputs/matching_results.tsv + candidate_pairs.tsv
+python -m src.predict test --dry-run   # empty valid submission -> outputs/ (smoke test)
+python -m scripts.build_dev_world      # small frozen dev dataset -> data/processed/dev_world/ (~20 s)
+python -m unittest discover -s tests -t . -v   # toy end-to-end contract test
 python data/raw/utils/validate_submission.py -m outputs/matching_results.tsv -c outputs/candidate_pairs.tsv -t data/raw/dataset/test
 ```
 
@@ -34,5 +36,7 @@ python data/raw/utils/validate_submission.py -m outputs/matching_results.tsv -c 
 | `normalize.py`, `blocking.py` | cleaning + candidate generation (`[s1_id, cand_id]`) | Person 2 |
 | `features.py`, `matcher.py` | pair features + LightGBM + threshold | Person 3 |
 | `evaluate.py` | macro F0.5, blocking recall, validation split, submission checks | Person 4 |
+
+Read `docs/CONTRACT.md` before writing code: it fixes the data shapes between modules.
 
 Constraints: only the supplied dataset is used, with no external APIs or data.
