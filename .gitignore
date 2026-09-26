@@ -1,0 +1,29 @@
+# Data & artifacts (repo is public — never commit competition data)
+data/**
+!data/**/
+!data/**/.gitkeep
+outputs/**
+!outputs/.gitkeep
+*.zip
+*.pdf
+*.parquet
+*.csv
+*.pkl
+*.joblib
+*.npy
+*.bin
+*.pt
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.env
+.ipynb_checkpoints/
+
+# OS / IDE
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
