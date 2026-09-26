@@ -11,7 +11,7 @@ notebooks/       # EDA
 outputs/         # submissions & models (git-ignored)
 ```
 
-## Setup
+## Setup (Python 3.12)
 ```bash
 python -m venv .venv
 .venv\Scripts\activate
