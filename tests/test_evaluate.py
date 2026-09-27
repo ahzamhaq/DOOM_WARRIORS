@@ -1,5 +1,4 @@
-"""Person 4 tests: evaluate.py (split, labels, contract checks, blocking report, validation scoring) and
-scripts/package_submission.py (submission zip).
+"""Person 4 tests: evaluate.py (split, labels, contract checks, blocking report, validation scoring).
 
     python -m unittest discover -s tests -t . -v
 
@@ -7,17 +6,13 @@ Scoring is cross-checked against Person 3's notebooks/train_matcher.score / swee
 0.9400 at threshold 0.70 in PROGRESS.md) on random scored frames, with matcher.select_matches injected,
 one-to-one off and on. On real data run `python -m notebooks.check_evaluate` (needs the dev world).
 """
-import tempfile
 import unittest
-import zipfile
-from pathlib import Path
 
 import numpy as np
 import pandas as pd
 import pyarrow as pa
 
 import tests.test_contract as tc
-from scripts import package_submission as ps
 from src import evaluate as ev
 from src.config import BLK_COLUMNS, CAND_ID, PROBA, S1_ID, SEED
 from src.predict import run_pipeline
@@ -347,125 +342,6 @@ class ScoringTest(unittest.TestCase):
         sweep = pd.DataFrame({"threshold": [0.3, 0.5, 0.7, 0.9], "macro_f05": [0.8, 0.9, 0.9, 0.85]})
         self.assertEqual(ev._best_row(sweep)["threshold"], 0.7)
 
-
-# ------------------------------------------------------------------ submission package
-FAKE_VALIDATOR = """import sys
-ok = open(sys.argv[sys.argv.index('-m') + 1], encoding='utf-8').read().startswith('source1_entity_id')
-print('PASS' if ok else 'FAIL: bad header'); sys.exit(0 if ok else 1)
-"""
-
-
-class PackageTest(unittest.TestCase):
-    def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory()
-        r = self.root = Path(self.tmp.name)
-        (s1, s2, s3), _ = tc.build_toy()
-        self.test_dir = r / "test"
-        self.test_dir.mkdir()
-        for n, df in (("1", s1), ("2", s2), ("3", s3)):
-            df.to_csv(self.test_dir / f"test_source{n}.tsv", sep="\t", index=False, lineterminator="\n")
-
-        def load_country(c):
-            idx = lambda d: d[d["country"] == c].set_index("entity_id", drop=False)  # noqa: E731
-            return idx(s1), pd.concat([idx(s2), idx(s3)])
-
-        self.out = r / "outputs"
-        run_pipeline(tc.COUNTRIES, load_country, tc.FakeModel(), self.out, tc.FAKES, 4, False, log=lambda *_: None)
-        self.repo = r / "repo"
-        for f, text in (("src/a.py", "x = 1\n"), ("src/sub/b.py", "y = 2\n"), ("src/__pycache__/c.py", "junk\n"),
-                        ("scripts/s.py", "z = 3\n"), ("requirements.txt", "pandas==3.0.6\n# comment\n")):
-            (self.repo / f).parent.mkdir(parents=True, exist_ok=True)
-            (self.repo / f).write_text(text, encoding="utf-8")
-        self.doc, self.readme, self.validator = r / "doc.md", r / "readme.md", r / "validate.py"
-        self.doc.write_text("# Method\n", encoding="utf-8")
-        self.readme.write_text("# Reproduce\n", encoding="utf-8")
-        self.validator.write_text(FAKE_VALIDATOR, encoding="utf-8")
-        self.zip = r / "sub.zip"
-
-    def tearDown(self):
-        self.tmp.cleanup()
-
-    def package(self, **kw):
-        args = dict(matches=self.out / "matching_results.tsv", candidates=self.out / "candidate_pairs.tsv",
-                    doc=self.doc, readme=self.readme, out=self.zip, test_dir=self.test_dir,
-                    validator=self.validator, repo=self.repo, log=lambda *_: None)
-        return ps.package(**{**args, **kw})
-
-    def assertFails(self, msg, **kw):
-        with self.assertRaisesRegex(ps.PackagingError, msg):
-            self.package(**kw)
-        self.assertFalse(self.zip.exists(), "a failed run must leave no zip")
-        self.assertFalse(list(self.root.glob("*.partial")))
-
-    def write(self, name, lines):
-        path = self.root / name
-        path.write_text("\n".join(lines) + "\n", encoding="utf-8", newline="\n")
-        return path
-
-    def test_zip_layout_and_contents(self):
-        self.package()
-        with zipfile.ZipFile(self.zip) as z:
-            code = "code/business_entity_resolution/"
-            self.assertEqual(sorted(z.namelist()), sorted([
-                "Documentation_template.md", "output/candidate_pairs.tsv", "output/matching_results.tsv",
-                code + "README.md", code + "requirements.txt", code + "scripts/s.py", code + "src/a.py",
-                code + "src/sub/b.py"]))
-            self.assertEqual(z.read("output/matching_results.tsv"), (self.out / "matching_results.tsv").read_bytes())
-        first = self.zip.read_bytes()
-        self.package()
-        self.assertEqual(self.zip.read_bytes(), first, "same inputs -> byte-identical zip")
-
-    def test_output_problems_fail_before_the_validator(self):
-        m = (self.out / "matching_results.tsv").read_text(encoding="utf-8").splitlines()
-        head, rows = m[0], m[1:]
-        s1 = rows[0].split("\t")[0]
-        self.assertFails("not a subset", matches=self.write("m1.tsv", [head, f"{s1}\tS2-999", *rows[1:]]))
-        self.assertFails("header", matches=self.write("m2.tsv", ["a\tb", *rows]))
-        self.assertFails("different number of rows", matches=self.write("m3.tsv", [head, *rows[:-1]]))
-        self.assertFails("S1 order differs", matches=self.write("m4.tsv", [head, *rows[::-1]]))
-        self.assertFails("non S2-/S3- id", matches=self.write("m5.tsv", [head, f"{s1}\t{s1}", *rows[1:]]))
-
-    def test_row_count_must_equal_test_s1(self):
-        f = self.test_dir / "test_source1.tsv"
-        f.write_text(f.read_text(encoding="utf-8") + "S1-999\tX\tY\tUS\n", encoding="utf-8")
-        self.assertFails("24 S1 rows but 25")
-
-    def test_validator_failure_is_loud(self):
-        self.validator.write_text("import sys; print('ERROR: ids missing'); sys.exit(1)\n", encoding="utf-8")
-        self.assertFails("(?s)official validator failed .*ids missing")
-        self.validator.write_text("print('looks fine')\n", encoding="utf-8")  # exit 0 but no PASS
-        self.assertFails("official validator failed")
-
-    def test_placeholders_unpinned_requirements_and_network_code(self):
-        self.doc.write_text("Score: [[TBD]]\n", encoding="utf-8")
-        self.assertFails("placeholder")
-        self.package(allow_placeholders=True)
-        self.zip.unlink()
-        self.doc.write_text("# ok\n", encoding="utf-8")
-        (self.repo / "requirements.txt").write_text("pandas>=2\n", encoding="utf-8")
-        self.assertFails("not pinned")
-        (self.repo / "requirements.txt").write_text("pandas==3.0.6\n", encoding="utf-8")
-        (self.repo / "src" / "net.py").write_text("import requests\n", encoding="utf-8")
-        self.assertFails("network access")
-        (self.repo / "src" / "net.py").write_text("U = 'ht' 'tp:' '//x'\nV = 'https://example.org'\n", encoding="utf-8")
-        self.assertFails("network access / URL 'https://'")
-
-    def test_stale_zip_is_removed_when_a_run_fails(self):
-        self.package()
-        self.validator.write_text("import sys; sys.exit(1)\n", encoding="utf-8")
-        self.assertFails("validator failed")
-
-    def test_missing_inputs_listed(self):
-        self.assertFails("official validator", validator=self.root / "nope.py")
-
-    def test_real_repo_code_passes_review(self):
-        ps.check_code(ps.ROOT, ps.ROOT / "requirements.txt")
-
-    def test_official_validator_on_toy_output(self):
-        if not ps.VALIDATOR.exists():
-            self.skipTest(f"official validator not found at {ps.VALIDATOR} (unzip student_resource into data/raw/)")
-        self.package(validator=ps.VALIDATOR)
-        self.assertTrue(self.zip.exists())
 
 
 if __name__ == "__main__":

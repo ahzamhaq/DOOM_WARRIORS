@@ -27,7 +27,11 @@ python -m src.predict test --dry-run   # empty valid submission -> outputs/ (smo
 python -m scripts.build_dev_world      # small frozen dev dataset -> data/processed/dev_world/ (~20 s)
 python -m unittest discover -s tests -t . -v   # toy end-to-end contract test
 python data/raw/utils/validate_submission.py -m outputs/matching_results.tsv -c outputs/candidate_pairs.tsv -t data/raw/dataset/test
+python -m scripts.package_submission   # validate + build outputs/DOOM_WARRIORS_submission.zip (final package)
 ```
+Final package: put the filled-in methodology at `docs/Documentation_template.md`; the package README is
+`docs/SUBMISSION_README.md`. The packager refuses empty (dry-run) outputs, a validator FAIL, an unfilled doc and
+unpinned requirements, then checks the zipped code imports on its own.
 
 ## Pipeline & owners
 | Module | Role | Owner |

@@ -25,6 +25,7 @@ MONOTONE = {
     "name_jaro_winkler": 1, "name_core_jaccard": 1, "name_tfidf": 1,
     "addr_token_set": 1, "addr_ratio": 1, "addr_tfidf": 1, "house_num": 1,
     "country_match": 1, "blk_name_score": 1, "blk_addr_score": 1,
+    "addr_num_jaccard": 1, "addr_num_conflict": -1,
 }
 
 PARAMS = dict(

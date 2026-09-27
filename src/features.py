@@ -14,7 +14,7 @@ Performance: every distinct record is canonicalized and TF-IDF-transformed once 
 pair); string similarities run in rapidfuzz.process.cpdist (C++, all cores); TF-IDF cosine is a
 sparse row-wise product over blocks of pairs, so memory stays bounded.
 
-Features (21):
+Features (23):
   name    : name_ratio, name_token_set, name_token_sort, name_partial,
             name_jaro_winkler, name_core_jaccard, name_tfidf
   address : addr_token_set, addr_ratio, addr_tfidf
@@ -22,6 +22,8 @@ Features (21):
   empty   : name_missing, addr_missing   (sides with an empty field, 0-2)
   country : country_match  (1 when both labels agree; the label itself is never used)
   other   : script_mismatch, domain_name, cand_is_s3
+  numbers : addr_num_jaccard, addr_num_conflict (ALL numbers in the two addresses, not just the
+            first: near-duplicate decoys change e.g. 181/1 -> 181/10). NaN if a side has none.
   blocking: blk_name_score, blk_addr_score, blk_name_rank, blk_addr_rank (passed through)
 """
 from __future__ import annotations
@@ -53,6 +55,7 @@ FEATURE_NAMES: list[str] = [
     "addr_token_set", "addr_ratio", "addr_tfidf",
     "house_num", "name_missing", "addr_missing", "country_match",
     "script_mismatch", "domain_name", "cand_is_s3",
+    "addr_num_jaccard", "addr_num_conflict",
     *BLK_COLUMNS,
 ]
 
@@ -144,6 +147,7 @@ class _Side:
                        else np.array([bool(_DOMAIN.search(x)) for x in raw_name]))
         self.country = r["country"].astype(str).str.strip().str.lower().to_numpy(dtype=object)
         self.core = [frozenset(t for t in n.split() if t not in _LEGAL) for n in self.name]
+        self.nums = [frozenset(t for t in a.split() if any(ch.isdigit() for ch in t)) for a in self.addr]
 
     def take(self, arr):
         return arr[self.codes]
@@ -248,6 +252,11 @@ def build_features(pairs: pd.DataFrame, s1: pd.DataFrame, pool: pd.DataFrame, ct
     f["script_mismatch"] = (a.take(a.script) != b.take(b.script)).astype(np.float32)
     f["domain_name"] = (a.take(a.domain) | b.take(b.domain)).astype(np.float32)
     f["cand_is_s3"] = pairs[CAND_ID].astype(str).str.startswith("S3-").to_numpy(np.float32)
+    na, nb = a.take(np.array(a.nums, dtype=object)), b.take(np.array(b.nums, dtype=object))
+    f["addr_num_jaccard"] = np.fromiter(
+        ((len(x & y) / len(x | y)) if x and y else np.nan for x, y in zip(na, nb)), np.float32, n)
+    f["addr_num_conflict"] = np.fromiter(
+        (len(x ^ y) if x and y else np.nan for x, y in zip(na, nb)), np.float32, n)
     for c in BLK_COLUMNS:  # blocking's retrieval signals, passed through (NaN if absent)
         f[c] = (pd.to_numeric(pairs[c], errors="coerce").to_numpy(np.float32) if c in pairs.columns
                 else np.full(n, np.nan, np.float32))

@@ -194,18 +194,55 @@ def standin_candidates(s1: pd.DataFrame, pool: pd.DataFrame, k: int = BLOCK_K,
     return pairs[[S1_ID, CAND_ID, *BLK_COLUMNS]].reset_index(drop=True)
 
 
-def candidates(s1: pd.DataFrame, pool: pd.DataFrame) -> tuple[pd.DataFrame, str]:
-    try:
-        index = blocking.build_index(pool)
-        return blocking.generate_candidates(s1, index), "blocking.py"
-    except NotImplementedError:
-        return standin_candidates(s1, pool), "stand-in (blocking.py not implemented yet)"
+def candidates(s1: pd.DataFrame, pool: pd.DataFrame, mode: str = "auto") -> tuple[pd.DataFrame, str]:
+    """mode: auto = real blocking.py if implemented else stand-in; real = blocking.py (error if
+    missing); standin = always the stand-in (baseline for comparing against real blocking)."""
+    if mode != "standin":
+        try:
+            index = blocking.build_index(pool)
+            return blocking.generate_candidates(s1, index), "blocking.py"
+        except NotImplementedError:
+            if mode == "real":
+                raise
+    note = "" if mode == "standin" else " (blocking.py not implemented yet)"
+    return standin_candidates(s1, pool), "stand-in" + note
+
+
+def blocking_report(data: pd.DataFrame, truth: dict, s1_country: pd.Series) -> pd.DataFrame:
+    """Candidate recall by country and source (S2/S3) over ALL dev S1, plus per-retriever recall
+    and candidates per S1: the target Person 2's blocking has to beat."""
+    true = pd.DataFrame([(s, c) for s, cs in truth.items() for c in cs], columns=[S1_ID, CAND_ID])
+    true["country"] = true[S1_ID].map(s1_country).to_numpy()
+    true["source"] = true[CAND_ID].str[:2].to_numpy()
+    found = data.loc[data["label"] == 1, [S1_ID, CAND_ID, "blk_name_rank", "blk_addr_rank"]].assign(_f=True)
+    true = true.merge(found, on=[S1_ID, CAND_ID], how="left")
+    true["found"] = true["_f"].eq(True)
+    true["by_name"] = true["blk_name_rank"].fillna(-1) >= 0
+    true["by_addr"] = true["blk_addr_rank"].fillna(-1) >= 0
+    rows = []
+    for (country, source), g in true.groupby(["country", "source"]):
+        rows.append({"country": country, "source": source, "true_pairs": len(g), "recall": g["found"].mean(),
+                     "recall_name_only": g["by_name"].mean(), "recall_addr_only": g["by_addr"].mean()})
+    for country, g in true.groupby("country"):
+        rows.append({"country": country, "source": "all", "true_pairs": len(g), "recall": g["found"].mean(),
+                     "recall_name_only": g["by_name"].mean(), "recall_addr_only": g["by_addr"].mean()})
+    rows.append({"country": "all", "source": "all", "true_pairs": len(true), "recall": true["found"].mean(),
+                 "recall_name_only": true["by_name"].mean(), "recall_addr_only": true["by_addr"].mean()})
+    rep = pd.DataFrame(rows)
+    per_s1 = data.groupby(S1_ID).size()
+    cps = {c: per_s1.reindex(s1_country.index[s1_country == c]).fillna(0) for c in rep["country"].unique() if c != "all"}
+    cps["all"] = per_s1.reindex(s1_country.index).fillna(0)
+    rep["cands_per_s1"] = rep["country"].map({c: v.mean() for c, v in cps.items()})
+    rep["s1_without_cands"] = rep["country"].map({c: int((v == 0).sum()) for c, v in cps.items()})
+    return rep
 
 
 # ------------------------------------------------------------- main
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--hard-decoys", type=int, default=60, help="hard decoys per name word (0 = none)")
+    ap.add_argument("--blocking", choices=["auto", "real", "standin"], default="auto",
+                    help="auto: real blocking.py if implemented, else the stand-in")
     args = ap.parse_args()
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -224,10 +261,11 @@ def main() -> None:
     for country in sorted(s1_all["country"].unique()):
         s1 = normalize_or_raw(s1_all[s1_all["country"] == country])
         pool = normalize_or_raw(pool_all[pool_all["country"] == country])
-        pairs, source = candidates(s1, pool)
+        pairs, source = candidates(s1, pool, args.blocking)
         feats = build_features(pairs, s1, pool)
         assert feats.index.equals(pairs.index) and list(feats.columns) == FEATURE_NAMES
-        parts.append(pd.concat([pairs[[S1_ID, CAND_ID]], feats], axis=1).assign(country=country))
+        parts.append(pd.concat([pairs[[S1_ID, CAND_ID]].reset_index(drop=True), feats.reset_index(drop=True)],
+                               axis=1).assign(country=country))
         log(f"{country}: {len(s1):,} S1, {len(pool):,} pool -> {len(pairs):,} pairs")
         del s1, pool, pairs, feats
         gc.collect()
@@ -243,6 +281,7 @@ def main() -> None:
 
     n_true = sum(len(v) for v in truth.values())
     ceiling = data["label"].sum() / n_true
+    blk_rep = blocking_report(data, truth, s1_all["country"])
     log(f"{len(data):,} pairs, recall ceiling {ceiling:.4f}, positives {data['label'].mean():.1%}")
 
     def fit(mask_tr, mask_es):
@@ -266,6 +305,9 @@ def main() -> None:
     model.threshold = float(chosen["threshold"])
     model.save(MODEL_PATH)
     rep_off.to_csv(OUTPUT_DIR / "threshold_sweep.tsv", sep="\t", index=False, float_format="%.4f")
+    # saved for notebooks/error_analysis.py (git-ignored outputs/)
+    data.to_parquet(OUTPUT_DIR / "dev_pairs.parquet")
+    scored_val.to_parquet(OUTPUT_DIR / "val_scored.parquet")
 
     # ---- per country at the chosen threshold ----
     rows = []
@@ -278,7 +320,7 @@ def main() -> None:
     per_country = pd.DataFrame(rows)
 
     # ---- leave-one-country-out (proxy for the unseen country) ----
-    loco = []
+    loco, loco_reps = [], {}
     countries = sorted(s1_all["country"].unique())
     for held in countries:
         tr = (data["country"] != held) & (data["split"] == "train")
@@ -287,6 +329,7 @@ def main() -> None:
         ids = [s for s in val_ids if s1_all.at[s, "country"] == held]
         sc = scored_of(m, (data["country"] == held) & (data["split"] == "val"))
         rep = sweep(sc, truth, ids, one_to_one=False)
+        loco_reps[held] = rep
         at_chosen = rep[rep["threshold"] == model.threshold].iloc[0]
         own = best(rep)
         loco.append({"train_on": "+".join(c for c in countries if c != held), "validate_on": held,
@@ -294,6 +337,25 @@ def main() -> None:
                      "best_threshold_there": own["threshold"], "best_f05_there": own["macro_f05"],
                      "one_to_one_on_at_chosen": score(select_matches(sc, model.threshold, True), truth, ids)["macro_f05"]})
     loco = pd.DataFrame(loco)
+
+    # ---- threshold rule for an unseen country (France has no labels) ----
+    # Each rule is scored on every held-out country of the LOCO runs; regret = that country's best
+    # F0.5 minus the F0.5 the rule's threshold gets there. Pick the smallest worst-case regret.
+    snap = lambda t: float(GRID[np.abs(GRID - t).argmin()])
+    bests = loco["best_threshold_there"].to_numpy()
+    rules = {"pooled validation best (current)": model.threshold,
+             "mean of per-country bests": snap(bests.mean()),
+             "stricter of per-country bests": float(bests.max()),
+             "looser of per-country bests": float(bests.min())}
+    rule_rows = []
+    for name, t in rules.items():
+        regrets = [loco_reps[h].loc[loco_reps[h]["threshold"] == t, "macro_f05"].iloc[0] for h in countries]
+        regrets = [float(loco.loc[loco["validate_on"] == h, "best_f05_there"].iloc[0]) - f
+                   for h, f in zip(countries, regrets)]
+        rule_rows.append({"rule": name, "threshold": t, "worst_regret": max(regrets), "mean_regret": np.mean(regrets),
+                          **{f"regret_{h}": r for h, r in zip(countries, regrets)}})
+    rules_df = pd.DataFrame(rule_rows).sort_values(["worst_regret", "threshold"], ascending=[True, False])
+    france = rules_df.iloc[0]
 
     imp = pd.Series(model.clf.booster_.feature_importance("gain"), index=model.feature_names)
     imp = (imp / imp.sum()).sort_values(ascending=False)
@@ -316,6 +378,10 @@ def main() -> None:
         "## Per country at the chosen threshold", "", fmt(per_country[["country", "one_to_one", "S1", "precision",
                                                                          "recall", "macro_f05"]]), "",
         "## Leave-one-country-out (proxy for unseen France)", "", fmt(loco), "",
+        "## Threshold rule for an unseen country (France)", "",
+        f"Proposed: **{france['rule']} = {france['threshold']:.2f}** (smallest worst-case LOCO regret).", "",
+        fmt(rules_df), "",
+        "## Candidate recall (blocking target; all dev S1, both splits)", "", fmt(blk_rep), "",
         "## Feature importance (share of gain)", "", "```\n" + imp.to_string(float_format=lambda v: f"{v:.3f}") + "\n```",
     ]
     (OUTPUT_DIR / "matcher_report.md").write_text("\n".join(md) + "\n")
