@@ -28,17 +28,22 @@ _NO_PAIRS = pd.DataFrame({S1_ID: [], CAND_ID: []})
 
 @dataclass(frozen=True)
 class Components:
-    """The five module functions the pipeline calls. Swappable so tests can inject fakes."""
+    """The module functions the pipeline calls. Swappable so tests can inject fakes.
+
+    `build_feature_context` is optional (CONTRACT §5, §8): when set it runs once per country and its
+    result is passed to build_features(..., ctx=...); when None, build_features is called without ctx.
+    """
     normalize_records: Callable
     build_index: Callable
     generate_candidates: Callable
     build_features: Callable
     select_matches: Callable
+    build_feature_context: Callable | None = None
 
 
 REAL = Components(
     normalize.normalize_records, blocking.build_index, blocking.generate_candidates,
-    features.build_features, matcher.select_matches,
+    features.build_features, matcher.select_matches, features.build_context,
 )
 
 
@@ -50,6 +55,8 @@ def score_country(s1: pd.DataFrame, pool: pd.DataFrame, model, cand_path: Path,
     with proba >= PROBA_FLOOR.
     """
     index = comps.build_index(pool)
+    ctx = comps.build_feature_context(pool) if comps.build_feature_context else None  # once per country
+    feat_kw = {} if ctx is None else {"ctx": ctx}
     parts = []
     for start in range(0, len(s1), chunk_s1):
         chunk = s1.iloc[start:start + chunk_s1]
@@ -57,7 +64,7 @@ def score_country(s1: pd.DataFrame, pool: pd.DataFrame, model, cand_path: Path,
         append_id_lists(cands, chunk["entity_id"], cand_path)
         if cands.empty:
             continue
-        proba = model.predict_proba(comps.build_features(cands, chunk, pool))
+        proba = model.predict_proba(comps.build_features(cands, chunk, pool, **feat_kw))
         keep = proba >= PROBA_FLOOR
         parts.append(cands.loc[keep, [S1_ID, CAND_ID]].assign(**{PROBA: proba[keep]}))
         del cands, proba

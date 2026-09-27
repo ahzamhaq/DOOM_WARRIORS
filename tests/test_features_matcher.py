@@ -10,7 +10,7 @@ import numpy as np
 import pandas as pd
 
 from src.config import BLK_COLUMNS, CAND_ID, PROBA, S1_ID
-from src.features import FEATURE_NAMES, build_features
+from src.features import FEATURE_NAMES, build_context, build_features
 from src.matcher import Model, select_matches, train
 
 
@@ -63,6 +63,12 @@ class FeatureTests(unittest.TestCase):
         full = build_features(PAIRS, S1, POOL)
         part = build_features(PAIRS.iloc[1:3], S1, POOL)
         pd.testing.assert_frame_equal(full.loc[part.index], part)
+
+    def test_country_context_gives_identical_features(self):
+        ctx = build_context(POOL)
+        pd.testing.assert_frame_equal(build_features(PAIRS, S1, POOL, ctx=ctx), build_features(PAIRS, S1, POOL))
+        part = PAIRS.iloc[1:3]  # a chunk reusing the country's ctx
+        pd.testing.assert_frame_equal(build_features(part, S1, POOL, ctx=ctx), build_features(part, S1, POOL))
 
     def test_missing_id_raises(self):
         bad = PAIRS.copy()

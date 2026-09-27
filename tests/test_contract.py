@@ -226,6 +226,32 @@ class ContractTest(unittest.TestCase):
     def test_one_to_one_is_off_by_default(self):
         self.assertFalse(ONE_TO_ONE, "experimental: only turn on after validation shows it helps")
 
+    def test_feature_context_built_once_per_country_and_passed_to_every_chunk(self):
+        built, seen = [], []
+
+        def build_ctx(pool):
+            built.append(pool["country"].iloc[0])
+            return {"country": pool["country"].iloc[0]}
+
+        def feats_with_ctx(pairs, s1, pool, ctx):
+            self.assertEqual(ctx["country"], s1["country"].iloc[0], "ctx must be this country's")
+            seen.append(ctx["country"])
+            return fake_build_features(pairs, s1, pool)
+
+        comps = Components(fake_normalize, fake_build_index, fake_generate_candidates, feats_with_ctx,
+                           fake_select_matches, build_ctx)
+        out = self.run_toy_with("ctx", comps, chunk_s1=2)  # 6 S1 per country -> 3 chunks each
+        self.assertEqual(built, COUNTRIES, "exactly one context per country, in country order")
+        self.assertEqual(len(seen), 3 * len(COUNTRIES), "every chunk with candidates receives the ctx")
+        base = self.run_toy_with("noctx", FAKES, chunk_s1=2)  # fakes without the hook still work
+        for f in ("matching_results.tsv", "candidate_pairs.tsv"):
+            self.assertEqual((out / f).read_bytes(), (base / f).read_bytes())
+
+    def run_toy_with(self, name, comps, chunk_s1):
+        out = self.root / name
+        run_pipeline(COUNTRIES, self.load_country, FakeModel(), out, comps, chunk_s1, False, log=lambda *_: None)
+        return out
+
 
 if __name__ == "__main__":
     unittest.main()
