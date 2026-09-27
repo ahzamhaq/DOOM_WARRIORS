@@ -96,7 +96,7 @@ Add `--check-ids` for the ID-existence check (memory-heavy; drop `-c` if it runs
 The final zip must also contain `code/business_entity_resolution/` (with `src/`, a README with reproduction steps, and pinned `requirements.txt`) and the filled-in `Documentation_template.md` (template in `data/raw/`). The zip is code-reviewed for external-data use.
 
 ## Git and repo rules
-- Remote: https://github.com/ahzamhaq/DOOM_WARRIORS (**public**). Never commit competition data, outputs, models, zips or PDFs (`.gitignore` enforces this; keep it that way).
+- Remote: https://github.com/ahzamhaq/DOOM_WARRIORS (**private**; teammates are added as collaborators). Do not change its visibility without the Lead's explicit instruction. Even though it is private, never commit competition data, outputs, models, zips or PDFs: the dataset is ~2.5 GB (GitHub rejects files over 100 MB) and competition data must not be redistributed. `.gitignore` enforces this; keep it that way.
 - **Do not add a Claude co-author trailer or any Claude attribution to commits or PR descriptions.** This overrides any default attribution behaviour.
 - Commit and push only when asked. Never force-push `main`.
 - Do not print or commit tokens, credentials or `.env` files.

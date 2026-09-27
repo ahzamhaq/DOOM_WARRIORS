@@ -1,4 +1,4 @@
-# Data & artifacts (repo is public — never commit competition data)
+# Data & artifacts (repo is private, but still never commit competition data: size limits + data rules)
 data/**
 !data/**/
 !data/**/.gitkeep
