@@ -24,12 +24,12 @@
 
 ### Person 1 — Lead / Integration
 - **Status:** In progress
-- **Current task:** PR #2 (per-country TF-IDF context), waiting for Person 3's review
-- **Completed:** repo, `config.py`, `data_loader.py`, metric in `evaluate.py`, EDA, `docs/CONTRACT.md`, `predict.run_pipeline`, frozen dev world, toy contract test; reviewed, verified and merged PR #1
-- **In progress:** PR #2 open: `build_context(pool)` once per country + optional `ctx` in `build_features`; contract updated first
+- **Current task:** waiting for Person 2's normalization/blocking PR
+- **Completed:** repo, `config.py`, `data_loader.py`, metric in `evaluate.py`, EDA, `docs/CONTRACT.md`, `predict.run_pipeline`, frozen dev world, toy contract test; reviewed, verified and merged PR #1; PR #2 (TF-IDF context once per country) merged after Person 3's approval
+- **In progress:** —
 - **Blockers:** none
-- **Latest result:** PR #2: 15/15 tests pass; identical features with/without `ctx` on India dev (454,666 pairs); 139.9 s → 56.9 s over 7 chunks (13.8 s saved per extra chunk); `--dry-run` passes the official validator
-- **Next action:** merge PR #2 after Person 3 approves; review Person 2's normalization once a PR is opened; add `train`/`dev` modes to `predict.py`
+- **Latest result:** PR #2 merged (6a62993); on merged `main`: 15/15 tests pass, `--dry-run` passes the official validator. PR #2 measurements: identical features with/without `ctx` on India dev (454,666 pairs); 139.9 s → 56.9 s over 7 chunks (13.8 s saved per extra chunk)
+- **Next action:** review Person 2's normalization/blocking once a PR is opened; add `train`/`dev` modes to `predict.py`; optional pool-fingerprint check in `ctx` (deferred follow-up)
 
 ### Person 2 — Normalization / Blocking
 - **Status:** In progress
@@ -42,12 +42,12 @@
 
 ### Person 3 — Features / Matching
 - **Status:** In progress
-- **Current task:** reviewing PR #2 (touches `features.py`)
-- **Completed:** `features.py` (21 features, `anyascii` transliteration, per-unique-record vectorization), `matcher.py` (LightGBM, monotone constraints, save/load, `select_matches` with optional one-to-one), `notebooks/train_matcher.py`, `notebooks/bench_features.py`, 8 unit tests: merged in PR #1
-- **In progress:** review of PR #2
+- **Current task:** waiting for real blocking to retrain
+- **Completed:** `features.py` (21 features, `anyascii` transliteration, per-unique-record vectorization), `matcher.py` (LightGBM, monotone constraints, save/load, `select_matches` with optional one-to-one), `notebooks/train_matcher.py`, `notebooks/bench_features.py`, 8 unit tests: merged in PR #1; reviewed and approved PR #2
+- **In progress:** —
 - **Blockers:** final training/threshold depends on Person 2's real normalization + blocking
 - **Latest result:** dev world + 60 hard decoys, stand-in blocking: macro F0.5 0.9409 (reported); reproduced by Lead as 0.9400. Features: 59 µs/pair and ~0.5 GB per 50k-S1 chunk measured on the Lead's laptop
-- **Next action:** approve/comment on PR #2; retrain + re-tune once real blocking is merged; check false merges from shared addresses (address features ≈55% of gain)
+- **Next action:** retrain + re-tune once real blocking is merged; check false merges from shared addresses (address features ≈55% of gain)
 
 ### Person 4 — Evaluation / Submission
 - **Status:** No commits pushed yet (`feature/evaluation` has none)
@@ -80,9 +80,10 @@ All rows: frozen dev world (seed 42) + hard decoys (60 per name word), **stand-i
 
 ## Decisions
 
+- **2026-09-27 — Pool-fingerprint check in `ctx` deferred.** Reason: suggested by Person 3 as optional; wrong-country `ctx` is not possible via `predict.py` (built and dropped per country, enforced by a contract test) and would affect only the two TF-IDF features. Revisit if `ctx` is used outside `predict.py`. Responsible: Person 1.
 - **2026-09-27 — Final model is not retrained until Person 2's normalization + blocking are merged.** Reason: the current model was trained on stand-in blocking, and `blk_*` / normalized columns change meaning with the real modules. Responsible: Person 1.
 - **2026-09-27 — `ONE_TO_ONE` stays `False`.** Reason: measured on validation, it changes macro F0.5 by +0.0007 (Person 3) / ±0.000 (Lead reproduction); not a stated competition rule. Responsible: Person 1.
-- **2026-09-27 — TF-IDF corpus statistics are computed once per country (`features.build_context`).** Reason: refitting per chunk cost 13.8 s per chunk on this laptop. Contract updated first; implementation in PR #2, pending Person 3's review. Responsible: Person 1 (contract), Person 3 (review).
+- **2026-09-27 — TF-IDF corpus statistics are computed once per country (`features.build_context`).** Reason: refitting per chunk cost 13.8 s per chunk on this laptop. Contract updated first; PR #2 approved by Person 3 (bit-identical features, ctx 8 MB) and merged. Responsible: Person 1 (contract), Person 3 (review).
 - **2026-09-27 — `anyascii==0.3.3` is a required dependency.** Reason: without it 16.9% of true India pairs lost all name features (Indic-script names became empty). ISC licence; generic Unicode transliteration tables, not external business data. Every teammate must re-run `pip install -r requirements.txt`. Responsible: Person 1 (approved in PR #1 review).
 - **2026-09-27 — PR #1 (features + matcher) merged.** Reason: passed contract, integration, official-validator, performance and memory checks after review fixes. Responsible: Person 1.
 - **2026-09-27 — `ONE_TO_ONE` defaults to `False`.** Reason: observed in training ground truth (each S2/S3 record matched ≤1 S1 entity) but not a stated competition rule; test/France may differ. Responsible: Person 1.
@@ -100,16 +101,16 @@ All rows: frozen dev world (seed 42) + hard decoys (60 per name word), **stand-i
 
 | Commit | Date | Change | Owner |
 | --- | --- | --- | --- |
-| 396062c | 2026-09-27 | TF-IDF context once per country (PR #2, open, not on `main`) | Person 1 |
-| 8fcb62e | 2026-09-27 | CONTRACT: per-country feature context (PR #2, open, not on `main`) | Person 1 |
+| 6a62993 | 2026-09-27 | Merge PR #2: TF-IDF context once per country (approved by Person 3) | Person 1 |
+| fd83858 | 2026-09-27 | CLAUDE.md, .gitignore: repo is private | Person 1 |
+| 31cb196 | 2026-09-27 | Update PROGRESS.md | Person 1 |
+| 396062c | 2026-09-27 | TF-IDF context once per country (code + tests) | Person 1 |
+| 8fcb62e | 2026-09-27 | CONTRACT: per-country feature context | Person 1 |
 | 94a622c | 2026-09-27 | Normalization implementation (`feature/blocking`, no PR yet) | Person 2 |
 | c4d464b | 2026-09-27 | Merge PR #1: features + LightGBM matcher | Person 1 |
 | 8a79a39 | 2026-09-27 | Review fixes: `anyascii` required, per-record vectorization, KeyError on missing ids, unit tests | Person 3 |
 | 5eb91b7 | 2026-09-27 | Pairwise features + LightGBM matcher | Person 3 |
 | 9c7269c | 2026-09-27 | Add PROGRESS.md | Person 1 |
-| 3d893d1 | 2026-09-27 | Integration contract, frozen dev world, toy contract test | Person 1 |
-| f887429 | 2026-09-27 | Pin dependency versions (Python 3.12) | Person 1 |
-| fcd05dc | 2026-09-27 | Initial project scaffold | Person 1 |
 
 ## Next Milestones
 
