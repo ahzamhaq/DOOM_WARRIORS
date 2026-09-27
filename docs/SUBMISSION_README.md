@@ -20,7 +20,16 @@ data/raw/dataset/test/test_source1.tsv    test_source2.tsv   test_source3.tsv
 ```
 (i.e. copy the zip's `dataset/` folder into `data/raw/` here). All paths are defined in `src/config.py`.
 
-## 3. Reproduce end to end (data → normalization → blocking → features → matching → output)
+## 3a. Reproduce the SUBMITTED outputs (fast exact-key matcher, ~7 min)
+```bash
+python -m src.quick_match test    # -> outputs/matching_results.tsv, outputs/candidate_pairs.tsv
+python -m src.quick_match dev     # optional: macro F0.5 on the dev world (0.54, pair precision 0.9985)
+```
+Rule (`src/quick_match.py`): within the same country, the cleaned name (lowercased, punctuation and legal-form
+words removed) and the first house number of the address must be identical; keys shared by more than 10 pool
+records are dropped. `candidate_pairs.tsv` equals the matched pairs for this rule.
+
+## 3b. Full ML pipeline (normalization → blocking → features → LightGBM → threshold)
 ```bash
 python -m src.build_dev_world     # deterministic training subset (seed 42) -> data/processed/dev_world/
 python -m src.predict train       # train LightGBM, tune the F0.5 threshold on held-out S1 -> outputs/model.joblib
