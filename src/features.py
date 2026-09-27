@@ -1,6 +1,7 @@
 """Pairwise similarity features. Owner: Person 3.  Contract: docs/CONTRACT.md §5.
 
-build_features(pairs, s1, pool) -> feats: one float32 row per pair, same index and order as
+build_context(pool) -> ctx (once per country); build_features(pairs, s1, pool, ctx=None) -> feats:
+one float32 row per pair, same index and order as
 `pairs`, columns == FEATURE_NAMES. Depends only on the pair, the two records and corpus
 statistics computed from `pool`. No labels, no country string, no ID digits.
 
@@ -167,6 +168,12 @@ def fit_vectorizers(pool: pd.DataFrame) -> dict:
     return {key: TfidfTransformer().fit(_hash(docs or ["x"])) for key, docs in (("name", names), ("addr", addrs))}
 
 
+def build_context(pool: pd.DataFrame) -> dict:
+    """Per-country feature context (CONTRACT §5): corpus statistics from `pool` only. Build once per
+    country and pass to every chunk's build_features(..., ctx=...). Opaque to callers."""
+    return fit_vectorizers(pool)
+
+
 def _tfidf_rows(tt: TfidfTransformer, texts) -> sparse.csr_matrix:
     """L2-normalised TF-IDF rows, one per distinct record, built batch by batch."""
     texts = list(texts)
@@ -197,8 +204,9 @@ def _sim(scorer, x: list, y: list, both: np.ndarray, scale: float = 1.0) -> np.n
 
 
 # ------------------------------------------------------------- main
-def build_features(pairs: pd.DataFrame, s1: pd.DataFrame, pool: pd.DataFrame) -> pd.DataFrame:
+def build_features(pairs: pd.DataFrame, s1: pd.DataFrame, pool: pd.DataFrame, ctx: dict | None = None) -> pd.DataFrame:
     """`pairs`: s1_id, cand_id, blk_*. `s1`, `pool`: normalized records indexed by entity_id.
+    `ctx`: build_context(pool) for this country; None computes it here (identical result, slower per chunk).
 
     Returns float32 features, same index and order as `pairs`, columns == FEATURE_NAMES.
     Raises KeyError if a pair references an id missing from `s1` / `pool`.
@@ -208,7 +216,7 @@ def build_features(pairs: pd.DataFrame, s1: pd.DataFrame, pool: pd.DataFrame) ->
         return pd.DataFrame({c: pd.Series(dtype=np.float32) for c in FEATURE_NAMES}, index=pairs.index)
     a = _Side(pairs[S1_ID].to_numpy(), s1, "s1")
     b = _Side(pairs[CAND_ID].to_numpy(), pool, "pool")
-    vec = fit_vectorizers(pool)
+    vec = ctx if ctx is not None else build_context(pool)
 
     an, bn = a.take(a.name), b.take(b.name)
     aa, ba = a.take(a.addr), b.take(b.addr)
