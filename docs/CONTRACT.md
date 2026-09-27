@@ -17,9 +17,9 @@ data_loader ─► normalize ─► blocking ─► features ─► matcher ─�
 `predict.py` owns the loop. For each country found in the data (never a hard-coded list):
 
 1. Load S1 for the country, and S2 + S3 concatenated as the **pool**; normalize both.
-2. `index = blocking.build_index(pool)` once per country.
+2. `index = blocking.build_index(pool)` and `ctx = features.build_context(pool)`, both once per country.
 3. For each S1 **chunk** (`CHUNK_S1` rows): `blocking.generate_candidates` → append to `candidate_pairs.tsv`
-   → `features.build_features` → `model.predict_proba` → keep rows with proba >= `PROBA_FLOOR`.
+   → `features.build_features(pairs, chunk, pool, ctx=ctx)` → `model.predict_proba` → keep rows with proba >= `PROBA_FLOOR`.
 4. After all chunks: `matcher.select_matches(scored, model.threshold, one_to_one=config.ONE_TO_ONE)` → write `matching_results.tsv`.
 
 Why per country, chunked: RAM (see CLAUDE.md), and every true pair shares a country. Step 4 runs per
@@ -80,15 +80,23 @@ The pairs returned are exactly what goes into `candidate_pairs.tsv` and what the
 ## 5. features.py (Person 3)
 
 ```python
-FEATURE_NAMES: list[str]                       # fixed, exported by the module
-build_features(pairs, s1, pool) -> feats       # s1, pool are normalized records indexed by entity_id
+FEATURE_NAMES: list[str]                                  # fixed, exported by the module
+build_context(pool) -> ctx                                # once per country; opaque to callers
+build_features(pairs, s1, pool, ctx=None) -> feats        # s1, pool are normalized records indexed by entity_id
 ```
+**Per-country context (`ctx`).** Corpus statistics (the TF-IDF/IDF weights) are computed once per country by
+`build_context(pool)` and passed to every chunk's `build_features` call, instead of being refit per chunk.
+- `ctx` depends **only on `pool`** and is deterministic (no labels, no S1 data, no row-order dependence).
+- `build_features(..., ctx=None)` computes the same context from `pool` itself, so existing callers keep working.
+  **Passing `build_context(pool)` must give identical features to passing `None`** (tested).
+- A `ctx` belongs to the one country's pool it was built from: never reuse it across countries or pools.
+- Callers treat `ctx` as opaque: no reading or editing its contents outside `features.py`.
+- `ctx` is held in RAM for the duration of the country only; it must stay small (no per-record data).
 - One row per pair, same index and order as `pairs`. Numeric only (`float32`; NaN allowed, no inf).
 - Pass the `blk_*` columns through as features (they are strong signals).
 - Depends only on the pair, the two records, and static corpus statistics. **No labels, no `country` string,
   no ID digits.** Derive source (S2/S3) from the ID prefix if useful.
-- If it needs corpus statistics (IDF etc.), compute them inside from `pool`; the Lead can add an optional
-  per-country `ctx` argument later if this is too slow.
+- Corpus statistics (IDF etc.) come from `pool` only, via `ctx` (above).
 
 ## 6. matcher.py (Person 3)
 
@@ -137,7 +145,9 @@ python -m src.predict test                                    # full test → ou
 python -m src.predict test --dry-run                          # empty submission (validator smoke test)
 ```
 `run_pipeline(countries, load_country, model, out_dir, comps=REAL, chunk_s1, one_to_one)` is the single integration path
-(`comps` = the five module functions; tests inject fakes there). Both output files are written per country as the loop goes (`data_loader.append_id_lists`), so full result
+(`comps` = the module functions; tests inject fakes there). `Components.build_feature_context` is optional:
+when set, it is called once per country and its result passed to `build_features(..., ctx=...)`; when `None`
+(e.g. fakes that predate `ctx`), `build_features` is called without `ctx`. Both output files are written per country as the loop goes (`data_loader.append_id_lists`), so full result
 dicts are never held in RAM. Every S1 id gets a row, including those with no candidates or matches.
 
 ## 9. Who can start now, and against what
