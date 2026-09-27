@@ -1,7 +1,7 @@
 # ML Challenge 2026: Business Entity Resolution Solution Template
 
 **Team Name:** DOOM_WARRIORS
-**Team Members:** Ahzam Haque (lead / integration), Satyam (normalization + blocking), Prashant Roy (features + matching), Person 4 (evaluation + submission)
+**Team Members:** Ahzam Haque (lead / integration), Satyam (normalization + blocking), Prashant Roy (features + matching), Vansh (evaluation + submission)
 **Submission Date:** 2026-09-27
 
 ---
