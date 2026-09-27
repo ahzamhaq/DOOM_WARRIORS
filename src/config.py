@@ -22,6 +22,8 @@ BLOCK_K = 20               # candidates per retriever per S1
 MAX_CANDS_PER_S1 = 40      # hard cap after unioning retrievers
 PROBA_FLOOR = 0.05         # scored pairs below this are dropped before resolution
 MODEL_PATH = OUTPUT_DIR / "model.joblib"
+THRESHOLD_GRID = [round(0.10 + 0.05 * i, 2) for i in range(18)]  # 0.10 .. 0.95 (CONTRACT §7 threshold rule)
+ES_FRAC = 0.15             # share of TRAIN-split S1 held out for early stopping in `predict train`
 # EXPERIMENTAL: each S2/S3 record matched at most one S1 in train. Off until Person 3 shows on validation
 # that enforcing it helps (docs/CONTRACT.md §6). Flip here, not inside the matcher.
 ONE_TO_ONE = False
