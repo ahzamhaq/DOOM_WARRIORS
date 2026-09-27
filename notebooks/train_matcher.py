@@ -1,27 +1,27 @@
-"""Train + validate the pairwise matcher (Person 3). Run from the repo root:
+"""Train, validate and save the matcher (Person 3). Run from the repo root:
 
-    python3 -m notebooks.train_matcher                      # defaults
-    python3 -m notebooks.train_matcher --candidates data/processed/train_candidates.tsv
+    python -m scripts.build_dev_world            # once (Lead's frozen dev world)
+    python -m notebooks.train_matcher            # train + threshold/one-to-one/per-country/LOCO report
 
-Candidates, in order of preference:
-  1. --candidates FILE : pairs produced by Person 2's blocking on train S1
-     (columns s1_id, cand_id, optional rank/score; or the submission-style
-     source1_entity_id / candidate_entity_ids format).
-  2. src.blocking.generate_candidates, if it is implemented.
-  3. A temporary stand-in (country-blocked char TF-IDF retrieval, the plan
-     written in blocking.py) so the matcher can be built before blocking lands.
-     It runs on a sample of train S1 against a reduced S2/S3 pool: all true
-     matches of the sample, plus "hard" decoys that share a name word with a
-     sampled S1 record, plus a random background slice. blocking.py is never
-     modified.
+Data: the frozen dev world (docs/CONTRACT.md §10), frozen train/val split. Its decoys are thinned
+(~1/73 of real density), so by default it is topped up with "hard decoys": raw train S2/S3 records
+of the same country sharing a name word with a dev-world S1 (at most --hard-decoys per word).
+That makes precision numbers much less optimistic. --hard-decoys 0 = pure dev world.
 
-Outputs (git-ignored): outputs/matcher_bundle.joblib, outputs/threshold_report.tsv,
-outputs/matcher_report.md. Uses only the supplied training data.
+Uses the real normalize.normalize_records / blocking.build_index + generate_candidates as soon as
+they are implemented; until then features.py derives the normalized columns itself and a stand-in
+retriever (country-level char TF-IDF on name and address, top BLOCK_K each, capped at
+MAX_CANDS_PER_S1, emitting the same blk_* columns) produces the pairs. blocking.py is never
+modified. Only the supplied training data is used.
+
+Outputs (git-ignored): config.MODEL_PATH (model + tuned threshold), outputs/matcher_report.md,
+outputs/threshold_sweep.tsv.
 """
 from __future__ import annotations
 
 import argparse
 import gc
+import hashlib
 import time
 from collections import defaultdict
 
@@ -29,33 +29,76 @@ import numpy as np
 import pandas as pd
 import pyarrow as pa
 import pyarrow.csv as pacsv
-from scipy import sparse
-from sklearn.feature_extraction.text import TfidfVectorizer
 
-from src.config import OUTPUT_DIR, PROCESSED_DIR, SEED, SOURCE_COLUMNS
-from src.data_loader import load_ground_truth_raw, load_source, source_path
-from src.evaluate import candidate_recall, truth_dict
-from src.features import FEATURE_COLUMNS, _LEGAL, build_features, fit_vectorizers, normalize_name
-from src.matcher import (best_threshold, evaluate_matches, predict_proba, save_bundle,
-                         select_matches, threshold_report, train)
+from src import blocking, normalize
+from src.config import (BETA, BLK_COLUMNS, BLOCK_K, CAND_ID, MAX_CANDS_PER_S1, MODEL_PATH, ONE_TO_ONE,
+                        OUTPUT_DIR, PROBA, PROCESSED_DIR, S1_ID, SOURCE_COLUMNS)
+from src.data_loader import load_dev_world, source_path
+from src.evaluate import truth_dict
+from src.features import FEATURE_NAMES, _LEGAL, build_features, canon_name
+from src.matcher import select_matches, train
 
 T0 = time.time()
+GRID = np.round(np.arange(0.10, 0.96, 0.05), 2)
 
 
 def log(msg: str) -> None:
-    print(f"[{time.time() - T0:7.0f}s] {msg}", flush=True)
+    print(f"[{time.time() - T0:6.0f}s] {msg}", flush=True)
 
 
-def stream_source(split: str, source: int, keep):
-    """Read one source file in blocks, keeping rows where keep(df) is True."""
+def _u(key: str) -> float:
+    """Deterministic uniform [0,1) from a string (machine- and version-independent)."""
+    return int(hashlib.sha1(key.encode()).hexdigest()[:12], 16) / 16 ** 12
+
+
+# ------------------------------------------------------------- scoring
+def f_beta(pred: set, truth: set, beta: float = BETA) -> float:
+    """Per-entity F-beta exactly as in the README (singleton + empty prediction = 1.0)."""
+    if not truth:
+        return 1.0 if not pred else 0.0
+    tp = len(pred & truth)
+    if tp == 0:
+        return 0.0
+    p, r = tp / len(pred), tp / len(truth)
+    return (1 + beta ** 2) * p * r / (beta ** 2 * p + r)
+
+
+def score(matches: pd.DataFrame, truth: dict, s1_ids) -> dict:
+    """Macro F0.5 over ALL `s1_ids` + pair-level precision/recall + singleton accuracy."""
+    pred = matches.groupby(S1_ID)[CAND_ID].agg(set).to_dict() if len(matches) else {}
+    tp = n_pred = n_true = single = single_ok = 0
+    f = 0.0
+    for s in s1_ids:
+        p, t = pred.get(s, set()), truth.get(s, set())
+        hit = len(p & t)
+        tp, n_pred, n_true = tp + hit, n_pred + len(p), n_true + len(t)
+        f += f_beta(p, t)
+        if not t:
+            single += 1
+            single_ok += not p
+    return {"precision": tp / n_pred if n_pred else 1.0, "recall": tp / n_true if n_true else 1.0,
+            "singleton_acc": single_ok / single if single else 1.0,
+            "macro_f05": f / len(s1_ids) if len(s1_ids) else 0.0, "pred_pairs": n_pred}
+
+
+def sweep(scored: pd.DataFrame, truth: dict, s1_ids, one_to_one: bool) -> pd.DataFrame:
+    return pd.DataFrame([{"threshold": float(t), **score(select_matches(scored, t, one_to_one), truth, s1_ids)}
+                         for t in GRID])
+
+
+def best(rep: pd.DataFrame) -> pd.Series:
+    top = rep["macro_f05"].max()
+    return rep[rep["macro_f05"] >= top - 1e-12].sort_values("threshold").iloc[-1]
+
+
+# ------------------------------------------------------------- data
+def stream_raw(source: int, keep) -> pd.DataFrame:
     reader = pacsv.open_csv(
-        source_path(split, source),
+        source_path("train", source),
         read_options=pacsv.ReadOptions(block_size=32 << 20),
         parse_options=pacsv.ParseOptions(delimiter="\t", quote_char=False),
-        convert_options=pacsv.ConvertOptions(
-            column_types={c: pa.string() for c in SOURCE_COLUMNS},
-            include_columns=SOURCE_COLUMNS, strings_can_be_null=False),
-    )
+        convert_options=pacsv.ConvertOptions(column_types={c: pa.string() for c in SOURCE_COLUMNS},
+                                             include_columns=SOURCE_COLUMNS, strings_can_be_null=False))
     parts = []
     for batch in reader:
         df = batch.to_pandas()
@@ -65,221 +108,219 @@ def stream_source(split: str, source: int, keep):
     return pd.concat(parts, ignore_index=True) if parts else pd.DataFrame(columns=SOURCE_COLUMNS)
 
 
-def core_tokens(norm_name: str) -> set:
-    return {t for t in norm_name.split() if len(t) > 2 and t not in _LEGAL}
+def hard_decoys(s1: pd.DataFrame, exclude: set, per_token: int) -> pd.DataFrame:
+    """Raw train S2/S3 records sharing a (non-legal) name word with a dev-world S1 of the same
+    country, at most `per_token` per (country, word). Cached under data/processed/."""
+    path = PROCESSED_DIR / f"hard_decoys_{per_token}.tsv"
+    if path.exists():
+        return pd.read_csv(path, sep="\t", dtype=str, keep_default_na=False, quoting=3)
+    words = defaultdict(set)
+    for name, country in zip(canon_name(s1["business_name"]), s1["country"]):
+        for w in name.split():
+            if len(w) > 2 and w not in _LEGAL:
+                words[w].add(country)
+    used = defaultdict(int)
 
-
-# ------------------------------------------------------------- stand-in -----
-def build_pool(s1: pd.DataFrame, truth: dict, per_token: int, background: float) -> pd.DataFrame:
-    """Reduced S2/S3 pool for the stand-in candidate generator."""
-    needed = set().union(*(truth[s] for s in s1["entity_id"]))
-    tok_country = defaultdict(set)  # token -> countries of sampled S1 using it
-    for name, country in zip(normalize_name(s1["business_name"]), s1["country"]):
-        for t in core_tokens(name):
-            tok_country[t].add(country)
-    used = defaultdict(int)  # (country, token) -> decoys kept so far
-    rng = np.random.default_rng(SEED)
-
-    def keep(df: pd.DataFrame) -> np.ndarray:
-        m = np.array(df["entity_id"].isin(needed).to_numpy(), dtype=bool)  # writable copy
-        m |= rng.random(len(df)) < background
-        names = normalize_name(df["business_name"])
-        for i, (name, country) in enumerate(zip(names, df["country"])):
-            if m[i]:
+    def keep(df):
+        m = np.zeros(len(df), dtype=bool)
+        for i, (eid, name, country) in enumerate(zip(df["entity_id"], canon_name(df["business_name"]), df["country"])):
+            if eid in exclude:
                 continue
-            for t in core_tokens(name):
-                if country in tok_country.get(t, ()) and used[(country, t)] < per_token:
-                    used[(country, t)] += 1
+            for w in name.split():
+                if country in words.get(w, ()) and used[(country, w)] < per_token:
+                    used[(country, w)] += 1
                     m[i] = True
                     break
         return m
 
-    parts = []
-    for src in (2, 3):
-        log(f"  streaming train_source{src}")
-        parts.append(stream_source("train", src, keep))
-    pool = pd.concat(parts, ignore_index=True)
-    log(f"  pool: {len(pool):,} records ({int(pool['entity_id'].isin(needed).sum()):,} true matches)")
-    return pool
+    out = pd.concat([stream_raw(src, keep) for src in (2, 3)], ignore_index=True)
+    PROCESSED_DIR.mkdir(parents=True, exist_ok=True)
+    out.to_csv(path, sep="\t", index=False)
+    return out
 
 
+def normalize_or_raw(df: pd.DataFrame) -> pd.DataFrame:
+    try:
+        return normalize.normalize_records(df)
+    except NotImplementedError:
+        return df  # features.py derives the normalized columns itself
+
+
+# ------------------------------------------------------------- candidates
 def _topk(q, c, k: int, batch: int = 200):
-    """Top-k cosine neighbours of rows of q among rows of c (both L2-normed)."""
     ct = c.T.tocsr()
-    idx_all, sc_all = [], []
     for s in range(0, q.shape[0], batch):
         sim = (q[s:s + batch] @ ct).tocsr()
         for r in range(sim.shape[0]):
-            row = sim.getrow(r)
-            if row.nnz == 0:
-                idx_all.append(np.empty(0, int)); sc_all.append(np.empty(0))
-                continue
-            kk = min(k, row.nnz)
-            top = np.argpartition(-row.data, kk - 1)[:kk]
-            order = top[np.argsort(-row.data[top])]
-            idx_all.append(row.indices[order]); sc_all.append(row.data[order])
-    return idx_all, sc_all
+            lo, hi = sim.indptr[r], sim.indptr[r + 1]
+            data, cols = sim.data[lo:hi], sim.indices[lo:hi]
+            if len(data) > k:
+                top = np.argpartition(-data, k - 1)[:k]
+                data, cols = data[top], cols[top]
+            order = np.argsort(-data, kind="stable")
+            yield cols[order], data[order]
 
 
-def standin_candidates(s1: pd.DataFrame, pool: pd.DataFrame, k: int) -> pd.DataFrame:
-    """Country-blocked char TF-IDF retrieval on name and on name+address,
-    top-k each, unioned; rank = best rank over the two retrievers."""
-    rows = []
-    for country, q in s1.groupby("country", sort=False):
-        c = pool[pool["country"] == country].reset_index(drop=True)
-        if c.empty:
-            continue
-        for fields in (["business_name"], ["business_name", "business_address"]):
-            qt = normalize_name(q[fields].astype(str).agg(" ".join, axis=1))
-            ctext = normalize_name(c[fields].astype(str).agg(" ".join, axis=1))
-            vec = TfidfVectorizer(analyzer="char_wb", ngram_range=(3, 3), min_df=2,
-                                  max_df=0.01, sublinear_tf=True, dtype=np.float32)
+def standin_candidates(s1: pd.DataFrame, pool: pd.DataFrame, k: int = BLOCK_K,
+                       max_cands: int = MAX_CANDS_PER_S1) -> pd.DataFrame:
+    """Stand-in for blocking.generate_candidates (same output columns). One country at a time."""
+    from sklearn.feature_extraction.text import TfidfVectorizer
+    frames = []
+    for field, raw in (("name", "business_name"), ("addr", "business_address")):
+        ctext = canon_name(pool[raw].astype(str))
+        qtext = canon_name(s1[raw].astype(str))
+        vec = TfidfVectorizer(analyzer="char_wb", ngram_range=(3, 3), min_df=2, max_df=0.01,
+                              sublinear_tf=True, dtype=np.float32)
+        try:
             cm = vec.fit_transform(ctext)
-            qm = vec.transform(qt)
-            idx, sc = _topk(qm, cm, k)
-            cids = c["entity_id"].to_numpy()
-            for sid, ii, ss in zip(q["entity_id"], idx, sc):
-                for r, (j, v) in enumerate(zip(ii, ss)):
-                    rows.append((sid, cids[j], r, float(v)))
-        log(f"  {country}: {len(q):,} S1 queries vs {len(c):,} pool records")
-    cand = pd.DataFrame(rows, columns=["s1_id", "cand_id", "rank", "score"])
-    return (cand.sort_values(["s1_id", "cand_id", "score"], ascending=[True, True, False])
-                .groupby(["s1_id", "cand_id"], as_index=False)
-                .agg(rank=("rank", "min"), score=("score", "max")))
+        except ValueError:
+            continue
+        qm = vec.transform(qtext)
+        cids = pool.index.to_numpy()
+        rows = [(sid, cids[j], float(v), r)
+                for sid, (cols, vals) in zip(s1.index, _topk(qm, cm, k))
+                for r, (j, v) in enumerate(zip(cols, vals)) if v > 0]
+        frames.append(pd.DataFrame(rows, columns=[S1_ID, CAND_ID, f"blk_{field}_score", f"blk_{field}_rank"]))
+    pairs = frames[0]
+    for fr in frames[1:]:
+        pairs = pairs.merge(fr, on=[S1_ID, CAND_ID], how="outer")
+    for c in BLK_COLUMNS:
+        if c not in pairs:
+            pairs[c] = np.nan
+    pairs[["blk_name_rank", "blk_addr_rank"]] = pairs[["blk_name_rank", "blk_addr_rank"]].fillna(-1)
+    best_score = pairs[["blk_name_score", "blk_addr_score"]].max(axis=1)
+    pairs = (pairs.assign(_b=best_score).sort_values([S1_ID, "_b"], ascending=[True, False])
+                  .groupby(S1_ID, sort=False).head(max_cands).drop(columns="_b"))
+    return pairs[[S1_ID, CAND_ID, *BLK_COLUMNS]].reset_index(drop=True)
 
 
-def read_candidates(path: str) -> pd.DataFrame:
-    df = pd.read_csv(path, sep="\t", dtype=str, keep_default_na=False)
-    if "candidate_entity_ids" in df.columns:  # submission-style file
-        df = (df.rename(columns={"source1_entity_id": "s1_id"})
-                .assign(cand_id=lambda d: d["candidate_entity_ids"].str.split(","))
-                .explode("cand_id"))
-        df = df[df["cand_id"].fillna("") != ""][["s1_id", "cand_id"]]
-    for col in ("rank", "score"):
-        if col in df.columns:
-            df[col] = pd.to_numeric(df[col])
-    return df.reset_index(drop=True)
+def candidates(s1: pd.DataFrame, pool: pd.DataFrame) -> tuple[pd.DataFrame, str]:
+    try:
+        index = blocking.build_index(pool)
+        return blocking.generate_candidates(s1, index), "blocking.py"
+    except NotImplementedError:
+        return standin_candidates(s1, pool), "stand-in (blocking.py not implemented yet)"
 
 
-# ------------------------------------------------------------- main ---------
+# ------------------------------------------------------------- main
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--candidates", help="train candidate pairs TSV from blocking")
-    ap.add_argument("--n-s1", type=int, default=20_000, help="train S1 sample (stand-in only)")
-    ap.add_argument("--k", type=int, default=15, help="top-k per retriever (stand-in only)")
-    ap.add_argument("--per-token", type=int, default=150, help="hard decoys per word (stand-in)")
-    ap.add_argument("--background", type=float, default=0.01, help="random decoy share (stand-in)")
-    ap.add_argument("--val-frac", type=float, default=0.3)
+    ap.add_argument("--hard-decoys", type=int, default=60, help="hard decoys per name word (0 = none)")
     args = ap.parse_args()
-    rng = np.random.default_rng(SEED)
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-    PROCESSED_DIR.mkdir(parents=True, exist_ok=True)
 
-    log("loading train S1 + ground truth")
-    s1_all = load_source("train", 1)
-    gt_raw = load_ground_truth_raw()
+    dw = load_dev_world()
+    truth = truth_dict(dw.truth_raw)
+    s1_all, pool_all = dw.s1, dw.pool
+    if args.hard_decoys:
+        log(f"adding hard decoys ({args.hard_decoys} per name word, cached after the first run)")
+        extra = hard_decoys(s1_all, set(pool_all.index), args.hard_decoys)
+        extra = extra[~extra["entity_id"].isin(pool_all.index)].set_index("entity_id", drop=False)
+        pool_all = pd.concat([pool_all, extra])
+    log(f"dev world: {len(s1_all):,} S1, pool {len(pool_all):,} records")
 
-    source = "stand-in"
-    if args.candidates:
-        cands = read_candidates(args.candidates)
-        source = f"blocking file {args.candidates}"
-        s1 = s1_all[s1_all["entity_id"].isin(set(cands["s1_id"]))].reset_index(drop=True)
-    else:
-        s1 = s1_all.sample(n=min(args.n_s1, len(s1_all)), random_state=SEED).reset_index(drop=True)
-        cands = None
-    del s1_all
-    gt_raw = gt_raw[gt_raw["source1_entity_id"].isin(set(s1["entity_id"]))]
-    truth = truth_dict(gt_raw)  # only for the sampled entities (saves ~1 GB)
-    del gt_raw
-    gc.collect()
-    log(f"{len(s1):,} train S1 entities, countries {s1['country'].value_counts().to_dict()}")
+    # ---- per country: candidates + features (a module never sees two countries at once) ----
+    parts, source = [], ""
+    for country in sorted(s1_all["country"].unique()):
+        s1 = normalize_or_raw(s1_all[s1_all["country"] == country])
+        pool = normalize_or_raw(pool_all[pool_all["country"] == country])
+        pairs, source = candidates(s1, pool)
+        feats = build_features(pairs, s1, pool)
+        assert feats.index.equals(pairs.index) and list(feats.columns) == FEATURE_NAMES
+        parts.append(pd.concat([pairs[[S1_ID, CAND_ID]], feats], axis=1).assign(country=country))
+        log(f"{country}: {len(s1):,} S1, {len(pool):,} pool -> {len(pairs):,} pairs")
+        del s1, pool, pairs, feats
+        gc.collect()
+    data = pd.concat(parts, ignore_index=True)
+    del parts
+    data["label"] = np.fromiter((c in truth.get(s, ()) for s, c in zip(data[S1_ID], data[CAND_ID])),
+                                np.int8, len(data))
+    split = s1_all["split"]
+    data["split"] = data[S1_ID].map(split).to_numpy()
+    # early stopping: 15 % of the TRAIN S1 entities (deterministic), validation stays untouched
+    es = {s for s in s1_all.index[split == "train"] if _u("es" + s) < 0.15}
+    data.loc[data[S1_ID].isin(es), "split"] = "es"
 
-    if cands is not None:
-        need = set(cands["cand_id"])
-        pool = pd.concat([stream_source("train", s, lambda d: d["entity_id"].isin(need).to_numpy())
-                          for s in (2, 3)], ignore_index=True)
-    else:
-        log("building reduced S2/S3 pool")
-        pool = build_pool(s1, truth, args.per_token, args.background)
-        try:
-            from src.blocking import generate_candidates
-            cands = generate_candidates(s1, pool)
-            source = "src.blocking.generate_candidates (reduced pool)"
-        except NotImplementedError:
-            log("blocking.py not implemented yet -> using the temporary stand-in")
-            cands = standin_candidates(s1, pool, args.k)
+    n_true = sum(len(v) for v in truth.values())
+    ceiling = data["label"].sum() / n_true
+    log(f"{len(data):,} pairs, recall ceiling {ceiling:.4f}, positives {data['label'].mean():.1%}")
 
-    cand_dict = cands.groupby("s1_id")["cand_id"].apply(list).to_dict()
-    ceiling = candidate_recall(cand_dict, truth)
-    log(f"candidates: {len(cands):,} pairs ({len(cands) / len(s1):.1f}/S1), recall ceiling {ceiling:.4f}")
+    def fit(mask_tr, mask_es):
+        return train(data.loc[mask_tr, FEATURE_NAMES], data.loc[mask_tr, "label"],
+                     data.loc[mask_es, FEATURE_NAMES], data.loc[mask_es, "label"])
 
-    # ---- split by S1 entity (no entity in both train and validation) ----
-    ids = s1["entity_id"].to_numpy()
-    val_ids = set(rng.choice(ids, size=int(len(ids) * args.val_frac), replace=False))
-    is_val = cands["s1_id"].isin(val_ids).to_numpy()
-    cands["label"] = [int(c in truth[s]) for s, c in zip(cands["s1_id"], cands["cand_id"])]
+    def scored_of(model, mask):
+        d = data.loc[mask]
+        return pd.DataFrame({S1_ID: d[S1_ID].to_numpy(), CAND_ID: d[CAND_ID].to_numpy(),
+                             PROBA: model.predict_proba(d[FEATURE_NAMES])})
 
-    log("fitting TF-IDF vectorizers on train-side text")
-    vecs = fit_vectorizers(s1[~s1["entity_id"].isin(val_ids)], pool)
+    # ---- main model: train split -> validation split ----
+    log("training on the train split")
+    model = fit(data["split"] == "train", data["split"] == "es")
+    val_ids = list(s1_all.index[split == "val"])
+    scored_val = scored_of(model, data["split"] == "val")
+    rep_off = sweep(scored_val, truth, val_ids, one_to_one=False)
+    rep_on = sweep(scored_val, truth, val_ids, one_to_one=True)
+    b_off, b_on = best(rep_off), best(rep_on)
+    chosen = b_on if ONE_TO_ONE else b_off
+    model.threshold = float(chosen["threshold"])
+    model.save(MODEL_PATH)
+    rep_off.to_csv(OUTPUT_DIR / "threshold_sweep.tsv", sep="\t", index=False, float_format="%.4f")
 
-    log("building features")
-    feats = build_features(cands, s1, pool, vecs)
-    X_tr, y_tr = feats[~is_val], cands.loc[~is_val, "label"]
-    X_va, y_va = feats[is_val], cands.loc[is_val, "label"]
-    log(f"train pairs {len(X_tr):,} (pos {y_tr.mean():.1%}) | val pairs {len(X_va):,} (pos {y_va.mean():.1%})")
+    # ---- per country at the chosen threshold ----
+    rows = []
+    for country in sorted(s1_all["country"].unique()):
+        ids = [s for s in val_ids if s1_all.at[s, "country"] == country]
+        sc = scored_val[scored_val[S1_ID].isin(set(ids))]
+        for o2o in (False, True):
+            rows.append({"country": country, "one_to_one": o2o, "S1": len(ids),
+                         **score(select_matches(sc, model.threshold, o2o), truth, ids)})
+    per_country = pd.DataFrame(rows)
 
-    # Early stopping uses 15% of the *train* entities, so the validation
-    # entities stay untouched until the threshold sweep.
-    tr_ids = np.array(sorted(set(ids) - val_ids))
-    es_ids = set(rng.choice(tr_ids, size=int(len(tr_ids) * 0.15), replace=False))
-    is_es = cands.loc[~is_val, "s1_id"].isin(es_ids).to_numpy()
-    log("training LightGBM")
-    model = train(X_tr[~is_es], y_tr[~is_es], eval_set=(X_tr[is_es], y_tr[is_es]))
-    proba = predict_proba(model, X_va)
-    val_pairs = cands.loc[is_val, ["s1_id", "cand_id"]].reset_index(drop=True)
-    val_truth = {s: truth[s] for s in val_ids}
+    # ---- leave-one-country-out (proxy for the unseen country) ----
+    loco = []
+    countries = sorted(s1_all["country"].unique())
+    for held in countries:
+        tr = (data["country"] != held) & (data["split"] == "train")
+        es_m = (data["country"] != held) & (data["split"] == "es")
+        m = fit(tr, es_m)
+        ids = [s for s in val_ids if s1_all.at[s, "country"] == held]
+        sc = scored_of(m, (data["country"] == held) & (data["split"] == "val"))
+        rep = sweep(sc, truth, ids, one_to_one=False)
+        at_chosen = rep[rep["threshold"] == model.threshold].iloc[0]
+        own = best(rep)
+        loco.append({"train_on": "+".join(c for c in countries if c != held), "validate_on": held,
+                     "f05_at_chosen_threshold": at_chosen["macro_f05"],
+                     "best_threshold_there": own["threshold"], "best_f05_there": own["macro_f05"],
+                     "one_to_one_on_at_chosen": score(select_matches(sc, model.threshold, True), truth, ids)["macro_f05"]})
+    loco = pd.DataFrame(loco)
 
-    rep = threshold_report(val_pairs, proba, val_truth)
-    rep_free = threshold_report(val_pairs, proba, val_truth, one_to_one=False)
-    t_best = best_threshold(rep)
-    best = rep[rep["threshold"] == t_best].iloc[0]
-
-    base_all = evaluate_matches(val_pairs.groupby("s1_id")["cand_id"].apply(list).to_dict(), val_truth)
-    rule = X_va["name_token_set"].to_numpy() >= 0.9
-    base_rule = evaluate_matches(select_matches(val_pairs, rule.astype(float), 0.5), val_truth)
-    base_empty = evaluate_matches({}, val_truth)
-
-    save_bundle(OUTPUT_DIR / "matcher_bundle.joblib", model, vecs, t_best)
-    rep.to_csv(OUTPUT_DIR / "threshold_report.tsv", sep="\t", index=False, float_format="%.4f")
-
-    imp = pd.Series(model.booster_.feature_importance("gain"), index=FEATURE_COLUMNS)
+    imp = pd.Series(model.clf.booster_.feature_importance("gain"), index=model.feature_names)
     imp = (imp / imp.sum()).sort_values(ascending=False)
-    cols = ["threshold", "precision", "recall", "macro_precision", "macro_recall",
-            "singleton_acc", "macro_f05", "pred_pairs"]
+    fmt = lambda df: "```\n" + df.to_string(index=False, float_format=lambda v: f"{v:.4f}") + "\n```"
+    cols = ["threshold", "precision", "recall", "macro_f05", "singleton_acc", "pred_pairs"]
+    both = rep_off[["threshold", "precision", "recall", "macro_f05"]].merge(
+        rep_on[["threshold", "macro_f05"]].rename(columns={"macro_f05": "macro_f05_one_to_one"}), on="threshold")
     md = [
-        "# Matcher validation report", "",
-        f"- Candidates: {source}",
-        f"- Train S1 entities: {len(s1) - len(val_ids):,} (15% of them for early stopping) | validation S1 entities: {len(val_ids):,}",
-        f"- Candidate pairs: {len(cands):,} | recall ceiling (share of true pairs in candidates): {ceiling:.4f}",
-        f"- Trees used (early stopping): {model.best_iteration_ or model.n_estimators}",
-        f"- **Best threshold {t_best:.2f} -> macro F0.5 {best['macro_f05']:.4f}** "
-        f"(precision {best['precision']:.4f}, recall {best['recall']:.4f})", "",
-        "## Threshold sweep (one-to-one on)", "",
-        "```\n" + rep[cols].to_string(index=False, float_format=lambda v: f"{v:.4f}") + "\n```", "",
-        "## Same sweep without one-to-one clean-up", "",
-        "```\n" + rep_free[["threshold", "precision", "recall", "macro_f05"]].to_string(index=False, float_format=lambda v: f"{v:.4f}") + "\n```", "",
-        "## Baselines on the same validation entities", "",
-        f"- Predict nothing: macro F0.5 {base_empty['macro_f05']:.4f}",
-        f"- Predict every candidate: macro F0.5 {base_all['macro_f05']:.4f} "
-        f"(precision {base_all['precision']:.4f})",
-        f"- Rule name_token_set >= 0.9: macro F0.5 {base_rule['macro_f05']:.4f} "
-        f"(precision {base_rule['precision']:.4f}, recall {base_rule['recall']:.4f})", "",
-        "## Feature importance (share of gain)", "",
-        "```\n" + imp.to_frame("gain").to_string(float_format=lambda v: f"{v:.3f}") + "\n```",
+        "# Matcher validation report (Person 3)", "",
+        f"- Data: frozen dev world, frozen split ({len(s1_all) - len(val_ids):,} train S1 incl. early-stopping "
+        f"subset / {len(val_ids):,} validation S1); hard decoys per name word: {args.hard_decoys}",
+        f"- Candidates: {source}; {len(data):,} pairs; recall ceiling {ceiling:.4f}",
+        f"- Features: {len(FEATURE_NAMES)}; trees: {model.clf.best_iteration_ or model.clf.n_estimators}",
+        f"- **Chosen threshold {model.threshold:.2f} (one_to_one={ONE_TO_ONE}) -> validation macro F0.5 "
+        f"{chosen['macro_f05']:.4f}** (precision {chosen['precision']:.4f}, recall {chosen['recall']:.4f})",
+        f"- Best with one_to_one=True: threshold {b_on['threshold']:.2f} -> {b_on['macro_f05']:.4f} "
+        f"(difference {b_on['macro_f05'] - b_off['macro_f05']:+.4f})", "",
+        "## Threshold -> precision -> recall -> macro F0.5 (one_to_one off)", "", fmt(rep_off[cols]), "",
+        "## One-to-one off vs on", "", fmt(both), "",
+        "## Per country at the chosen threshold", "", fmt(per_country[["country", "one_to_one", "S1", "precision",
+                                                                         "recall", "macro_f05"]]), "",
+        "## Leave-one-country-out (proxy for unseen France)", "", fmt(loco), "",
+        "## Feature importance (share of gain)", "", "```\n" + imp.to_string(float_format=lambda v: f"{v:.3f}") + "\n```",
     ]
     (OUTPUT_DIR / "matcher_report.md").write_text("\n".join(md) + "\n")
     print("\n".join(md), flush=True)
-    log("done")
+    log(f"saved model + threshold to {MODEL_PATH}")
 
 
 if __name__ == "__main__":
