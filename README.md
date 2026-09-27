@@ -24,6 +24,9 @@ Unzip `student_resource.zip` into `data/raw/` so that `data/raw/dataset/{train,t
 ```bash
 python -m notebooks.eda      # dataset report
 python -m src.predict test --dry-run   # empty valid submission -> outputs/ (smoke test)
+python -m src.predict train [--country C] [--limit-s1 N]   # dev world: train + tune threshold -> outputs/model.joblib
+python -m src.predict dev   [--country C] [--limit-s1 N]   # dev world: validation macro F0.5 -> outputs/dev_report.md
+python -m src.predict test             # full test run with the saved model -> outputs/*.tsv
 python -m scripts.build_dev_world      # small frozen dev dataset -> data/processed/dev_world/ (~20 s)
 python -m unittest discover -s tests -t . -v   # toy end-to-end contract test
 python data/raw/utils/validate_submission.py -m outputs/matching_results.tsv -c outputs/candidate_pairs.tsv -t data/raw/dataset/test

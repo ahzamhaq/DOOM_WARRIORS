@@ -131,6 +131,14 @@ blocking_report(pairs, truth, s1_country) -> DataFrame                # recall, 
 sweep_thresholds(scored, truth, s1_ids, select_fn, grid) -> DataFrame # F0.5 per threshold (select_fn injected: no import cycle)
 per_country_report(matches, truth, s1_country) -> DataFrame
 ```
+Return shapes that `predict.py train/dev` rely on:
+- `split_s1` → two lists of S1 ids (disjoint, together = input), same result on every machine.
+- `sweep_thresholds` → one row per grid value with at least columns `threshold, precision, recall, macro_f05`.
+- `blocking_report` / `per_country_report` → DataFrames that are printed/saved as-is (free-form columns).
+
+**Threshold rule (fixed):** the chosen threshold is the one with the highest validation `macro_f05`; ties go to the
+**highest** threshold (precision first). Grid: `config.THRESHOLD_GRID`.
+
 The dev world (small frozen train subset) is built by the Lead's script, not by `evaluate.py`: see §10.
 Scoring always takes the full list of S1 ids: S1 entities with no candidates and true singletons must count.
 France has no labels: also report a **leave-one-country-out** score (train on US, validate on India, and the reverse)
@@ -144,6 +152,23 @@ python -m src.predict dev      [--country C] [--limit-s1 N]   # score validation
 python -m src.predict test                                    # full test → outputs/*.tsv
 python -m src.predict test --dry-run                          # empty submission (validator smoke test)
 ```
+**`train`** (data: frozen dev world, §10; its `split` column is the train/validation split):
+1. For each country, the dev-world S1 (both splits) and pool go through **exactly the test-time chunk loop**
+   (normalize → `build_index` + `build_context` once per country → per chunk `generate_candidates` → `build_features`).
+2. `evaluate.label_pairs` labels the pairs. `evaluate.split_s1(train_ids, val_frac=ES_FRAC)` carves an early-stopping
+   subset out of the TRAIN split; validation S1 are never used for fitting.
+3. `matcher.train(fit feats, fit labels, es feats, es labels)` → score validation pairs →
+   `evaluate.sweep_thresholds(..., select_fn=matcher.select_matches)` → threshold by the rule in §7.
+4. `model.threshold` is set and the model saved to `config.MODEL_PATH`; reports go to `outputs/train_report.md`.
+
+**`dev`**: loads `config.MODEL_PATH`, runs the validation S1 through the same loop, applies `select_matches` at
+`model.threshold` (one-to-one per `config.ONE_TO_ONE`) and writes macro F0.5, the blocking report and the per-country
+report to `outputs/dev_report.md`. `--limit-s1 N` keeps the first N S1 (by id) per country for smoke runs;
+`--country C` restricts to one country. Neither mode writes submission files.
+
+The scoring functions are injected as `Scoring` (defaults: `evaluate.*`), like `Components`, so tests can run
+both modes with fakes.
+
 `run_pipeline(countries, load_country, model, out_dir, comps=REAL, chunk_s1, one_to_one)` is the single integration path
 (`comps` = the module functions; tests inject fakes there). `Components.build_feature_context` is optional:
 when set, it is called once per country and its result passed to `build_features(..., ctx=...)`; when `None`
